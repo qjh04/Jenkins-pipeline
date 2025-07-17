@@ -1,0 +1,133 @@
+pipeline {
+    agent any
+    
+    environment {
+        // 从 Jenkins 凭据获取飞书配置
+        FEISHU_APP_ID = credentials('feishu-app-id')
+        FEISHU_APP_SECRET = credentials('feishu-app-secret')
+    }
+    
+    // 修改参数定义
+    parameters {
+        string(name: 'APPROVAL_STATUS', defaultValue: '', description: '审批状态')
+    }
+
+    stages {
+        stage('Validate Approval') {
+            steps {
+                script {
+                    // 添加调试信息
+                    echo "接收到的审批状态: ${params.APPROVAL_STATUS}"
+                    echo "环境变量中的审批状态: ${env.APPROVAL_STATUS}"
+                    
+                    // 修改判断逻辑，同时检查params和env
+                    def status = params.APPROVAL_STATUS ?: env.APPROVAL_STATUS
+                    if (status != 'APPROVED') {
+                        error "审批未通过，状态: ${status}"
+                    }
+                    echo "审批通过，开始触发部署..."
+                }
+            }
+        }
+
+        stage('Trigger Deploy') {
+            steps {
+                script {
+                    // 直接触发部署流水线，不带参数
+                    build job: 'feishu-approval-success', wait: false
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "部署流水线已触发"
+        }
+        failure {
+            script {
+                try {
+                    // 1. 获取访问令牌
+                    echo "开始获取访问令牌..."
+                    def tokenRequestBody = """{
+                        "app_id": "${FEISHU_APP_ID}",
+                        "app_secret": "${FEISHU_APP_SECRET}"
+                    }"""
+                    
+                    def tokenResponse = httpRequest(
+                        url: 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+                        httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: tokenRequestBody
+                    )
+                    
+                    def tokenJson = readJSON text: tokenResponse.content
+                    def accessToken = tokenJson.tenant_access_token
+                    
+                    if (accessToken == null || accessToken.trim() == '') {
+                        error "获取访问令牌失败: 令牌为空"
+                    }
+
+                    // 2. 准备消息内容
+                    def currentTime = new Date().format("yyyy-MM-dd HH:mm:ss")
+                    def buildUrl = env.BUILD_URL ?: "${env.JENKINS_URL}job/${env.JOB_NAME}/${env.BUILD_NUMBER}"
+                    
+                    def messageText = "❌ 审批流水线失败\\\\n" +
+                                    "流水线：${JOB_NAME}\\\\n" +
+                                    "构建编号：#${BUILD_NUMBER}\\\\n" +
+                                    "失败原因：审批状态 ${params.APPROVAL_STATUS}\\\\n" +
+                                    "失败时间：${currentTime}\\\\n" +
+                                    "构建地址：${buildUrl}"
+                    
+                    // 3. 获取用户的 open_id
+                    def userList = env.FEISHU_USER_LIST.split(',')
+                    def mobileQueryString = userList.collect { "mobiles=${it}" }.join('&')
+                    def userResponse = httpRequest(
+                        url: "https://open.feishu.cn/open-apis/user/v1/batch_get_id?${mobileQueryString}",
+                        httpMode: 'GET',
+                        customHeaders: [[
+                            name: 'Authorization',
+                            value: "Bearer ${accessToken}"
+                        ]],
+                        validResponseCodes: '100:599'
+                    )
+                    
+                    def userJson = readJSON text: userResponse.content
+                    def mobileUsers = userJson.data.mobile_users
+                    
+                    // 4. 发送消息给每个用户
+                    mobileUsers.each { mobile, users ->
+                        users.each { user ->
+                            def userId = user.open_id
+                            def messagePayload = """{
+                                "receive_id": "${userId}",
+                                "msg_type": "text",
+                                "content": "{\\\"text\\\":\\\"${messageText}\\\"}"
+                            }"""
+                            
+                            httpRequest(
+                                url: 'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+                                httpMode: 'POST',
+                                customHeaders: [[
+                                    name: 'Authorization',
+                                    value: "Bearer ${accessToken}"
+                                ], [
+                                    name: 'Content-Type',
+                                    value: 'application/json; charset=utf-8'
+                                ]],
+                                requestBody: messagePayload.trim(),
+                                validResponseCodes: '100:599'
+                            )
+                        }
+                    }
+                    
+                } catch (Exception e) {
+                    echo "发送飞书通知失败: ${e.getMessage()}"
+                }
+                echo "审批验证失败"
+            }
+        }
+    }
+} 
+
+

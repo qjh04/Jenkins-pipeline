@@ -1,0 +1,297 @@
+pipeline {
+    agent any
+
+    environment {
+        // 从 Jenkins 凭据获取飞书配置
+        FEISHU_APP_ID = credentials('feishu-app-id')
+        FEISHU_APP_SECRET = credentials('feishu-app-secret')
+        // Git仓库配置
+        GIT_REPO_URL = 'git@github.com:kqq-ai/wonderLand-go.git'
+        GIT_CREDENTIALS_ID = 'c96914f4-5b65-4230-a456-b9b68f46fcab'
+        TARGET_BRANCH = 'test'
+    }
+
+    stages {
+        stage('Checkout Test Branch') {
+            steps {
+                script {
+                    echo "检出目标分支: ${TARGET_BRANCH}"
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${TARGET_BRANCH}"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [],
+                        submoduleCfg: [],
+                        userRemoteConfigs: [[
+                            credentialsId: GIT_CREDENTIALS_ID,
+                            url: GIT_REPO_URL
+                        ]]
+                    ])
+                }
+            }
+        }
+
+        stage('Fetch All Branches') {
+            steps {
+                script {
+                    echo "获取所有远程分支..."
+                    sh '''
+                        git fetch --all
+                        git branch -r
+                    '''
+                }
+            }
+        }
+
+        stage('Find Test Branches') {
+            steps {
+                script {
+                    echo "查找以test-开头的分支..."
+                    def testBranches = sh(
+                        script: '''
+                            git branch -r | grep "origin/test-" | sed 's/origin\///' | tr -d ' '
+                        ''',
+                        returnStdout: true
+                    ).trim().split('\n').findAll { it }
+                    
+                    if (testBranches.size() == 0) {
+                        echo "没有找到以test-开头的分支"
+                        currentBuild.result = 'SUCCESS'
+                        return
+                    }
+                    
+                    echo "找到以下test-分支: ${testBranches}"
+                    env.TEST_BRANCHES = testBranches.join(',')
+                }
+            }
+        }
+
+        stage('Merge Test Branches') {
+            steps {
+                script {
+                    if (env.TEST_BRANCHES == null || env.TEST_BRANCHES.trim() == '') {
+                        echo "没有需要合并的分支"
+                        return
+                    }
+                    
+                    def testBranches = env.TEST_BRANCHES.split(',')
+                    def mergeResults = []
+                    def failedBranches = []
+                    
+                    testBranches.each { branch ->
+                        try {
+                            echo "开始合并分支: ${branch}"
+                            
+                            // 检出test分支
+                            sh "git checkout ${TARGET_BRANCH}"
+                            sh "git pull origin ${TARGET_BRANCH}"
+                            
+                            // 尝试合并分支
+                            def mergeResult = sh(
+                                script: """
+                                    git merge origin/${branch} --no-ff --no-edit
+                                """,
+                                returnStatus: true
+                            )
+                            
+                            if (mergeResult == 0) {
+                                echo "分支 ${branch} 合并成功"
+                                mergeResults.add("✅ ${branch}: 合并成功")
+                                
+                                // 推送到远程
+                                sh "git push origin ${TARGET_BRANCH}"
+                                
+                                // 删除原分支
+                                sh "git push origin --delete ${branch}"
+                                echo "分支 ${branch} 已删除"
+                                
+                            } else {
+                                echo "分支 ${branch} 合并失败，存在冲突"
+                                failedBranches.add(branch)
+                                mergeResults.add("❌ ${branch}: 合并失败 - 存在冲突")
+                                
+                                // 取消合并
+                                sh "git merge --abort"
+                            }
+                            
+                        } catch (Exception e) {
+                            echo "处理分支 ${branch} 时发生错误: ${e.getMessage()}"
+                            failedBranches.add(branch)
+                            mergeResults.add("❌ ${branch}: 处理失败 - ${e.getMessage()}")
+                        }
+                    }
+                    
+                    // 保存结果供后续使用
+                    env.MERGE_RESULTS = mergeResults.join('\n')
+                    env.FAILED_BRANCHES = failedBranches.join(',')
+                    
+                    // 如果有失败的合并，抛出错误
+                    if (failedBranches.size() > 0) {
+                        error "以下分支合并失败: ${failedBranches.join(', ')}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                try {
+                    // 1. 获取访问令牌
+                    echo "开始获取访问令牌..."
+                    def tokenRequestBody = """{
+                        "app_id": "${FEISHU_APP_ID}",
+                        "app_secret": "${FEISHU_APP_SECRET}"
+                    }"""
+                    
+                    def tokenResponse = httpRequest(
+                        url: 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+                        httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: tokenRequestBody
+                    )
+                    
+                    def tokenJson = readJSON text: tokenResponse.content
+                    def accessToken = tokenJson.tenant_access_token
+                    
+                    if (accessToken == null || accessToken.trim() == '') {
+                        error "获取访问令牌失败: 令牌为空"
+                    }
+
+                    // 2. 准备消息内容
+                    def buildStatus = currentBuild.result ?: 'SUCCESS'
+                    def status = buildStatus == 'SUCCESS' ? '✅ 分支合并成功' : '❌ 分支合并失败'
+                    
+                    // 获取当前时间
+                    def currentTime = new Date().format("yyyy-MM-dd HH:mm:ss")
+                    
+                    // 构建URL
+                    def buildUrl = env.BUILD_URL ?: "${env.JENKINS_URL}job/${env.JOB_NAME}/${env.BUILD_NUMBER}"
+                    
+                    // 计算构建耗时
+                    def duration = currentBuild.duration
+                    def durationStr = ""
+                    if (duration < 1000) {
+                        durationStr = "${duration}毫秒"
+                    } else if (duration < 60000) {
+                        def seconds = (duration/1000).intValue()
+                        durationStr = "${seconds}秒"
+                    } else {
+                        def minutes = (duration/60000).intValue()
+                        def seconds = ((duration%60000)/1000).intValue()
+                        durationStr = "${minutes}分${seconds}秒"
+                    }
+                    
+                    // 构建详细消息
+                    def messageText = "${status}\\\\n" +
+                                    "流水线：${JOB_NAME}\\\\n" +
+                                    "构建编号：#${BUILD_NUMBER}\\\\n" +
+                                    "目标分支：${TARGET_BRANCH}\\\\n" +
+                                    "构建耗时：${durationStr}\\\\n" +
+                                    "完成时间：${currentTime}\\\\n" +
+                                    "构建地址：${buildUrl}\\\\n" +
+                                    "构建结果：${buildStatus}"
+                    
+                    // 如果有合并结果，添加到消息中
+                    if (env.MERGE_RESULTS) {
+                        messageText += "\\\\n\\\\n合并详情：\\\\n${env.MERGE_RESULTS}"
+                    }
+                    
+                    // 如果有失败的分支，添加到消息中
+                    if (env.FAILED_BRANCHES && env.FAILED_BRANCHES.trim() != '') {
+                        messageText += "\\\\n\\\\n失败分支：${env.FAILED_BRANCHES}"
+                    }
+                    
+                    echo "发送的消息内容: ${messageText}"
+                    
+                    // 3. 获取用户的 open_id
+                    def userList = env.FEISHU_USER_LIST.split(',')
+                    def mobileQueryString = userList.collect { "mobiles=${it}" }.join('&')
+                    def userResponse = httpRequest(
+                        url: "https://open.feishu.cn/open-apis/user/v1/batch_get_id?${mobileQueryString}",
+                        httpMode: 'GET',
+                        customHeaders: [[
+                            name: 'Authorization',
+                            value: "Bearer ${accessToken}"
+                        ]],
+                        validResponseCodes: '100:599'
+                    )
+                    
+                    def userJson = readJSON text: userResponse.content
+                    def mobileUsers = userJson.data.mobile_users
+                    def mobilesNotExist = userJson.data.mobiles_not_exist ?: []
+                    
+                    if (mobilesNotExist.size() > 0) {
+                        def notExistList = ""
+                        mobilesNotExist.each { mobile ->
+                            if (notExistList) {
+                                notExistList += ", "
+                            }
+                            notExistList += mobile
+                        }
+                        echo "警告：以下手机号未找到对应用户：${notExistList}"
+                    }
+                    
+                    // 4. 发送消息给每个有效用户
+                    def failedUsers = []
+                    
+                    mobileUsers.each { mobile, users ->
+                        users.each { user ->
+                            def userId = user.open_id
+                            def messagePayload = """{
+                                "receive_id": "${userId}",
+                                "msg_type": "text",
+                                "content": "{\\\"text\\\":\\\"${messageText}\\\"}"
+                            }"""
+                            
+                            try {
+                                def response = httpRequest(
+                                    url: 'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+                                    httpMode: 'POST',
+                                    customHeaders: [[
+                                        name: 'Authorization',
+                                        value: "Bearer ${accessToken}"
+                                    ], [
+                                        name: 'Content-Type',
+                                        value: 'application/json; charset=utf-8'
+                                    ]],
+                                    requestBody: messagePayload.trim(),
+                                    validResponseCodes: '100:599'
+                                )
+                                
+                                if (response.status >= 400) {
+                                    def errorJson = readJSON text: response.content
+                                    echo "发送给用户 ${mobile}(${userId}) 失败: ${errorJson.msg}"
+                                    failedUsers.add(mobile)
+                                }
+                            } catch (Exception e) {
+                                echo "发送给用户 ${mobile}(${userId}) 时发生错误: ${e.getMessage()}"
+                                failedUsers.add(mobile)
+                            }
+                        }
+                    }
+                    
+                    // 5. 输出发送结果统计
+                    def totalUsers = userList.size()
+                    def successUsers = totalUsers - failedUsers.size() - mobilesNotExist.size()
+                    echo "消息发送完成，成功：${successUsers}，失败：${failedUsers.size()}，未找到用户：${mobilesNotExist.size()}"
+                    if (failedUsers.size() > 0) {
+                        def failedList = ""
+                        failedUsers.each { mobile ->
+                            if (failedList) {
+                                failedList += ", "
+                            }
+                            failedList += mobile
+                        }
+                        echo "发送失败的用户: ${failedList}"
+                    }
+                    
+                } catch (Exception e) {
+                    echo "发送飞书通知失败: ${e.getMessage()}"
+                    echo "详细错误: ${e.toString()}"
+                }
+            }
+        }
+    }
+} 
