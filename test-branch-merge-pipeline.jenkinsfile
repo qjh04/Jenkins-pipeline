@@ -6,38 +6,43 @@ pipeline {
         FEISHU_APP_ID = credentials('feishu-app-id')
         FEISHU_APP_SECRET = credentials('feishu-app-secret')
         // Git仓库配置
-        GIT_REPO_URL = 'git@github.com:kqq-ai/wonderLand-go.git'
-        GIT_CREDENTIALS_ID = 'c96914f4-5b65-4230-a456-b9b68f46fcab'
+        GIT_REPO_URL = 'https://github.com/qjh04/Jenkins-pipeline.git'
+        GIT_CREDENTIALS_ID = '01'
+        GITHUB_TOKEN = credentials('01')
         TARGET_BRANCH = 'test'
     }
 
     stages {
-        stage('Checkout Test Branch') {
+        stage('Checkout and Fetch All Branches') {
             steps {
                 script {
-                    echo "检出目标分支: ${TARGET_BRANCH}"
+                    echo "=== 检出目标分支并获取所有远程分支 ==="
+                    echo "目标分支: ${TARGET_BRANCH}"
+                    
+                    // 使用Jenkins Git插件检出目标分支并获取所有分支信息
                     checkout([
                         $class: 'GitSCM',
                         branches: [[name: "*/${TARGET_BRANCH}"]],
                         doGenerateSubmoduleConfigurations: false,
-                        extensions: [],
+                        extensions: [
+                            [$class: 'PruneStaleBranch'],  // 清理过时的远程分支引用
+                            [$class: 'LocalBranch', localBranch: "**"]  // 创建本地分支跟踪
+                        ],
                         submoduleCfg: [],
                         userRemoteConfigs: [[
                             credentialsId: GIT_CREDENTIALS_ID,
                             url: GIT_REPO_URL
                         ]]
                     ])
-                }
-            }
-        }
-
-        stage('Fetch All Branches') {
-            steps {
-                script {
-                    echo "获取所有远程分支..."
+                    
+                    // 显示分支信息
                     sh '''
-                        git fetch --all
+                        echo "=== 当前分支 ==="
+                        git branch --show-current
+                        echo "=== 所有远程分支 ==="
                         git branch -r
+                        echo "=== 所有本地分支 ==="
+                        git branch
                     '''
                 }
             }
@@ -49,7 +54,7 @@ pipeline {
                     echo "查找以test-开头的分支..."
                     def testBranches = sh(
                         script: '''
-                            git branch -r | grep "origin/test-" | sed 's/origin\///' | tr -d ' '
+                            git branch -r | grep "origin/test-" | sed 's/origin\\///' | tr -d ' '
                         ''',
                         returnStdout: true
                     ).trim().split('\n').findAll { it }
@@ -78,28 +83,46 @@ pipeline {
                     def mergeResults = []
                     def failedBranches = []
                     
-                    testBranches.each { branch ->
-                        try {
-                            echo "开始合并分支: ${branch}"
-                            
-                            // 检出test分支
-                            sh "git checkout ${TARGET_BRANCH}"
-                            sh "git pull origin ${TARGET_BRANCH}"
-                            
-                            // 尝试合并分支
-                            def mergeResult = sh(
-                                script: """
-                                    git merge origin/${branch} --no-ff --no-edit
-                                """,
-                                returnStatus: true
-                            )
+                                            testBranches.each { branch ->
+                            try {
+                                echo "开始合并分支: ${branch}"
+                                
+                                // 确保在test分支上
+                                sh "git checkout ${TARGET_BRANCH}"
+                                sh "git pull origin ${TARGET_BRANCH}"
+                                
+                                // 配置Git用户信息
+                                sh '''
+                                    git config user.name "Jenkins"
+                                    git config user.email "jenkins@example.com"
+                                '''
+                                
+                                // 使用Token进行Git操作
+                                withCredentials([string(credentialsId: '01', variable: 'GITHUB_TOKEN')]) {
+                                    sh '''
+                                        # 配置Git使用Token
+                                        git remote set-url origin https://${GITHUB_TOKEN}@github.com/qjh04/Jenkins-pipeline.git
+                                    '''
+                                }
+                                
+                                // 尝试合并分支
+                                def mergeResult = sh(
+                                    script: """
+                                        git merge origin/${branch} --no-ff --no-edit
+                                    """,
+                                    returnStatus: true
+                                )
                             
                             if (mergeResult == 0) {
                                 echo "分支 ${branch} 合并成功"
                                 mergeResults.add("✅ ${branch}: 合并成功")
                                 
-                                // 推送到远程
-                                sh "git push origin ${TARGET_BRANCH}"
+                                // 使用Jenkins Git插件推送
+                                sh """
+                                    git config user.name "Jenkins"
+                                    git config user.email "jenkins@example.com"
+                                    git push origin ${TARGET_BRANCH}
+                                """
                                 
                                 // 删除原分支
                                 sh "git push origin --delete ${branch}"
