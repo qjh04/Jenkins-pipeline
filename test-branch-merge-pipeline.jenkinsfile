@@ -131,15 +131,22 @@ pipeline {
                                 echo "分支 ${branch} 合并成功"
                                 mergeResults.add("✅ ${branch}: 合并成功")
                                 
-                                // 使用Jenkins Git插件推送
+                                // 使用Jenkins用户的SSH配置推送
                                 sh """
+                                    # 使用Jenkins用户的SSH配置
+                                    export GIT_SSH_COMMAND="ssh -i /var/lib/jenkins/.ssh/id_rsa"
+                                    
                                     git config user.name "Jenkins"
                                     git config user.email "jenkins@example.com"
                                     git push origin ${TARGET_BRANCH}
                                 """
                                 
                                 // 删除原分支
-                                sh "git push origin --delete ${branch}"
+                                sh """
+                                    # 使用Jenkins用户的SSH配置
+                                    export GIT_SSH_COMMAND="ssh -i /var/lib/jenkins/.ssh/id_rsa"
+                                    git push origin --delete ${branch}
+                                """
                                 echo "分支 ${branch} 已删除"
                                 
                             } else {
