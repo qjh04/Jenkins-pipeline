@@ -6,9 +6,8 @@ pipeline {
         FEISHU_APP_ID = credentials('feishu-app-id')
         FEISHU_APP_SECRET = credentials('feishu-app-secret')
         // Git仓库配置
-        GIT_REPO_URL = 'https://github.com/qjh04/Jenkins-pipeline.git'
-        GIT_CREDENTIALS_ID = '01'
-        GITHUB_TOKEN = credentials('01')
+        GIT_REPO_URL = 'git@github.com:qjh04/Jenkins-pipeline.git'
+        GIT_CREDENTIALS_ID = 'c96914f4-5b65-4230-a456-b9b68f46fcab'
         TARGET_BRANCH = 'test'
     }
 
@@ -35,8 +34,12 @@ pipeline {
                         ]]
                     ])
                     
-                    // 显示分支信息
+                    // 配置SSH并显示分支信息
                     sh '''
+                        # 配置SSH
+                        eval $(ssh-agent)
+                        ssh-add ~/.ssh/id_rsa 2>/dev/null || echo "SSH密钥添加失败"
+                        
                         echo "=== 当前分支 ==="
                         git branch --show-current
                         echo "=== 所有远程分支 ==="
@@ -87,9 +90,22 @@ pipeline {
                             try {
                                 echo "开始合并分支: ${branch}"
                                 
-                                // 确保在test分支上
-                                sh "git checkout ${TARGET_BRANCH}"
-                                sh "git pull origin ${TARGET_BRANCH}"
+                                // 确保在test分支上，使用Jenkins用户的SSH配置
+                                sh """
+                                    # 使用Jenkins用户的SSH配置
+                                    export GIT_SSH_COMMAND="ssh -i /var/lib/jenkins/.ssh/id_rsa"
+                                    
+                                    git checkout ${TARGET_BRANCH}
+                                    # 添加重试机制
+                                    for i in {1..3}; do
+                                        if git pull origin ${TARGET_BRANCH}; then
+                                            break
+                                        else
+                                            echo "第\${i}次pull失败，等待5秒后重试..."
+                                            sleep 5
+                                        fi
+                                    done
+                                """
                                 
                                 // 配置Git用户信息
                                 sh '''
@@ -97,13 +113,11 @@ pipeline {
                                     git config user.email "jenkins@example.com"
                                 '''
                                 
-                                // 使用Token进行Git操作
-                                withCredentials([string(credentialsId: '01', variable: 'GITHUB_TOKEN')]) {
-                                    sh '''
-                                        # 配置Git使用Token
-                                        git remote set-url origin https://${GITHUB_TOKEN}@github.com/qjh04/Jenkins-pipeline.git
-                                    '''
-                                }
+                                // 使用SSH方式，无需额外配置
+                                sh '''
+                                    # 确保使用SSH方式
+                                    git remote set-url origin git@github.com:qjh04/Jenkins-pipeline.git
+                                '''
                                 
                                 // 尝试合并分支
                                 def mergeResult = sh(
