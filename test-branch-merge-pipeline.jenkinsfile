@@ -11,12 +11,48 @@ pipeline {
         TARGET_BRANCH = 'test'
     }
 
+    triggers {
+        // 配置GitHub Webhook触发
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'branch', value: '$.ref_name'],
+                [key: 'repository', value: '$.repository.full_name']
+            ],
+            causeString: 'Triggered by GitHub Webhook',
+            // 只监控Jenkins-pipeline仓库的test-开头的分支
+            regexpFilterText: '$repository',
+            regexpFilterExpression: 'qjh04/Jenkins-pipeline'
+        )
+    }
+
     stages {
         stage('Checkout and Fetch All Branches') {
             steps {
                 script {
                     echo "=== 检出目标分支并获取所有远程分支 ==="
                     echo "目标分支: ${TARGET_BRANCH}"
+                    
+                    // 记录Webhook触发信息
+                    if (env.ref) {
+                        echo "Webhook触发信息:"
+                        echo "  分支: ${env.branch}"
+                        echo "  引用: ${env.ref}"
+                        echo "  仓库: ${env.repository}"
+                        
+                        // 验证是否是正确的仓库和分支
+                        if (env.repository != 'qjh04/Jenkins-pipeline') {
+                            echo "跳过：不是目标仓库"
+                            currentBuild.result = 'SUCCESS'
+                            return
+                        }
+                        
+                        if (!env.ref.startsWith('refs/heads/test-')) {
+                            echo "跳过：不是test-开头的分支"
+                            currentBuild.result = 'SUCCESS'
+                            return
+                        }
+                    }
                     
                     // 使用Jenkins Git插件检出目标分支并获取所有分支信息
                     checkout([
