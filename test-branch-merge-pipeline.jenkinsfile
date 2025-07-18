@@ -21,28 +21,39 @@ pipeline {
                     echo "目标分支: ${TARGET_BRANCH}"
                     
                     // 记录Webhook触发信息
-                    if (env.ref) {
+                    if (env.branch) {
                         // 从ref中提取分支名
-                        def branchName = env.ref.replaceAll('refs/heads/', '')
+                        def branchName = env.branch.replaceAll('refs/heads/', '')
                         env.BRANCH_NAME = branchName
                         
                         echo "Webhook触发信息:"
                         echo "  分支: ${branchName}"
-                        echo "  引用: ${env.ref}"
+                        echo "  引用: ${env.branch}"
                         echo "  仓库: ${env.repository}"
+                        echo "  是否创建: ${env.created}"
                         
                         // 验证是否是正确的仓库和分支
                         if (env.repository != 'qjh04/Jenkins-pipeline') {
-                            echo "跳过：不是目标仓库"
+                            echo "跳过：不是目标仓库 qjh04/Jenkins-pipeline"
                             currentBuild.result = 'SUCCESS'
                             return
                         }
                         
-                        if (!env.ref.startsWith('refs/heads/test-')) {
+                        if (!env.branch.startsWith('refs/heads/test-')) {
                             echo "跳过：不是test-开头的分支"
                             currentBuild.result = 'SUCCESS'
                             return
                         }
+                        
+                        if (env.created != 'true') {
+                            echo "跳过：不是分支创建事件"
+                            currentBuild.result = 'SUCCESS'
+                            return
+                        }
+                        
+                        echo "✅ 验证通过：目标仓库的test-分支创建事件，继续执行合并流程"
+                    } else {
+                        echo "⚠️ 未通过Webhook触发，将处理所有test-分支"
                     }
                     
                     // 使用Jenkins Git插件检出目标分支并获取所有分支信息
@@ -60,7 +71,7 @@ pipeline {
                             url: GIT_REPO_URL
                         ]]
                     ])
-                    
+
                     // 显示分支信息
                     sh '''
                         echo "=== 当前分支 ==="
@@ -109,10 +120,10 @@ pipeline {
                     def mergeResults = []
                     def failedBranches = []
                     
-                                            testBranches.each { branch ->
-                            try {
-                                echo "开始合并分支: ${branch}"
-                                
+                    testBranches.each { branch ->
+                        try {
+                            echo "开始合并分支: ${branch}"
+                            
                                 // 确保在test分支上，使用默认SSH配置
                                 sh """
                                     git checkout ${TARGET_BRANCH}
@@ -138,14 +149,14 @@ pipeline {
                                     # 确保使用SSH方式
                                     git remote set-url origin git@github.com:qjh04/Jenkins-pipeline.git
                                 '''
-                                
-                                // 尝试合并分支
-                                def mergeResult = sh(
-                                    script: """
-                                        git merge origin/${branch} --no-ff --no-edit
-                                    """,
-                                    returnStatus: true
-                                )
+                            
+                            // 尝试合并分支
+                            def mergeResult = sh(
+                                script: """
+                                    git merge origin/${branch} --no-ff --no-edit
+                                """,
+                                returnStatus: true
+                            )
                             
                             if (mergeResult == 0) {
                                 echo "分支 ${branch} 合并成功"
