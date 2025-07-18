@@ -11,20 +11,7 @@ pipeline {
         TARGET_BRANCH = 'test'
     }
 
-    triggers {
-        // 配置GitHub Webhook触发
-        GenericTrigger(
-            genericVariables: [
-                [key: 'ref', value: '$.ref'],
-                [key: 'branch', value: '$.ref_name'],
-                [key: 'repository', value: '$.repository.full_name']
-            ],
-            causeString: 'Triggered by GitHub Webhook',
-            // 只监控Jenkins-pipeline仓库的test-开头的分支
-            regexpFilterText: '$repository',
-            regexpFilterExpression: 'qjh04/Jenkins-pipeline'
-        )
-    }
+
 
     stages {
         stage('Checkout and Fetch All Branches') {
@@ -35,8 +22,12 @@ pipeline {
                     
                     // 记录Webhook触发信息
                     if (env.ref) {
+                        // 从ref中提取分支名
+                        def branchName = env.ref.replaceAll('refs/heads/', '')
+                        env.BRANCH_NAME = branchName
+                        
                         echo "Webhook触发信息:"
-                        echo "  分支: ${env.branch}"
+                        echo "  分支: ${branchName}"
                         echo "  引用: ${env.ref}"
                         echo "  仓库: ${env.repository}"
                         
